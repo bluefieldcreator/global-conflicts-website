@@ -1,101 +1,146 @@
-import { NextApiRequest } from "next";
-import { getSession } from "next-auth/react";
+import { NextApiRequest, NextApiResponse } from 'next';
+import { getSession, Session } from 'next-auth/react';
 
 export enum CREDENTIAL {
-	ANY = "ANY",
-	NEW_GUY = "New Guy",
-	MEMBER = "Member",
-	MISSION_MAKER = "Mission Maker",
-	MISSION_REVIEWER = "Mission Review Team",
-	MISSION_ADMINISTRATOR = "Mission Administrator",
-	GM = "Arma GM",
-	ADMIN = "Admin",
+    ANY = 'ANY',
+    NEW_GUY = 'New Guy',
+    MEMBER = 'Member',
+    MISSION_MAKER = 'Mission Maker',
+    MISSION_REVIEWER = 'Mission Review Team',
+    MISSION_ADMINISTRATOR = 'Mission Administrator',
+    GM = 'Arma GM',
+    ADMIN = 'Admin',
 }
 
-export default function validateUser(req, res, creds: CREDENTIAL, next = null) {
-	return new Promise(async (resolve, reject) => {
-		const session = await getSession({ req });
-		if (!session) {
-			return reject(401);
-		}
-		if (creds == CREDENTIAL.ANY) {
-			if (next) {
-				req.session = session;
-				return next();
-			} else {
-				return resolve(session.user);
-			}
-		}
-
-		for (var i = 0; i < session.user["roles"].length; i++) {
-			if (session.user["roles"][i].name == "Admin") {
-				if (next) {
-					session.user["isAdmin"] = true;
-					req.session = session;
-					req.isAdmin = true;
-
-					return next();
-				} else {
-					return resolve(session.user);
-				}
-			}
-		}
-
-		for (var i = 0; i < session.user["roles"].length; i++) {
-			if (session.user["roles"][i].name == creds) {
-				if (next) {
-					req.session = session;
-					return next();
-				} else {
-					return resolve(session.user);
-				}
-			}
-		}
-
-		return reject({ message: "Not Authorized" });
-	});
+interface UserRole {
+    name: string;
 }
 
-export function validateUserList(req, res, credList: Array<CREDENTIAL>, next = null) {
-	return new Promise(async (resolve, reject) => {
-		const session = await getSession({ req });
-		if (!session) {
-			return reject(401);
-		}
-		if (CREDENTIAL.ANY in credList) {
-			if (next) {
-				req.session = session;
-				return next();
-			} else {
-				return resolve(session.user);
-			}
-		}
+interface ExtendedSession extends Session {
+    user: {
+        roles: UserRole[];
+        isAdmin?: boolean;
+    };
+}
 
-		for (var i = 0; i < session.user["roles"].length; i++) {
-			if (session.user["roles"][i].name == "Admin") {
-				if (next) {
-					session.user["isAdmin"] = true;
-					req.session = session;
-					req.isAdmin = true;
+interface ExtendedRequest extends NextApiRequest {
+    session?: ExtendedSession;
+    isAdmin?: boolean;
+}
 
-					return next();
-				} else {
-					return resolve(session.user);
-				}
-			}
-		}
+type NextFunction = () => void | Promise<void>;
+type ValidationResult = Promise<ExtendedSession['user'] | void>;
 
-		for (var i = 0; i < session.user["roles"].length; i++) {
-			if (credList.includes(session.user["roles"][i].name)) {
-				if (next) {
-					req.session = session;
-					return next();
-				} else {
-					return resolve(session.user);
-				}
-			}
-		}
+/**
+ * Checks if a user has admin privileges
+ */
+const isAdmin = (roles: UserRole[]): boolean => {
+    return roles.some(role => role.name === CREDENTIAL.ADMIN);
+};
 
-		return reject({ message: "Not Authorized" });
-	});
+/**
+ * Checks if a user has a specific credential
+ */
+const hasCredential = (roles: UserRole[], cred: CREDENTIAL): boolean => {
+    return roles.some(role => role.name === cred);
+};
+
+/**
+ * Handles successful authentication
+ */
+const handleSuccess = (
+    req: ExtendedRequest,
+    session: ExtendedSession,
+    hasAdminRole: boolean,
+    next?: NextFunction
+): ValidationResult => {
+    if (next) {
+        if (hasAdminRole) {
+            session.user.isAdmin = true;
+            req.isAdmin = true;
+        }
+        req.session = session;
+        return Promise.resolve(next());
+    }
+    return Promise.resolve(session.user);
+};
+
+/**
+ * Validates a single credential
+ */
+export async function validateUser(
+    req: ExtendedRequest,
+    res: NextApiResponse,
+    cred: CREDENTIAL,
+    next?: NextFunction
+): ValidationResult {
+    try {
+        const session = await getSession({ req }) as ExtendedSession;
+        
+        if (!session) {
+            throw new Error('Unauthorized');
+        }
+
+        if (cred === CREDENTIAL.ANY) {
+            return handleSuccess(req, session, false, next);
+        }
+
+        const hasAdminRole = isAdmin(session.user.roles);
+        if (hasAdminRole) {
+            return handleSuccess(req, session, true, next);
+        }
+
+        if (hasCredential(session.user.roles, cred)) {
+            return handleSuccess(req, session, false, next);
+        }
+
+        throw new Error('Not Authorized');
+    } catch (error) {
+        if (error.message === 'Unauthorized') {
+            return Promise.reject(401);
+        }
+        return Promise.reject({ message: error.message });
+    }
+}
+
+/**
+ * Validates multiple credentials
+ */
+export async function validateUserList(
+    req: ExtendedRequest,
+    res: NextApiResponse,
+    credList: CREDENTIAL[],
+    next?: NextFunction
+): ValidationResult {
+    try {
+        const session = await getSession({ req }) as ExtendedSession;
+        
+        if (!session) {
+            throw new Error('Unauthorized');
+        }
+
+        if (credList.includes(CREDENTIAL.ANY)) {
+            return handleSuccess(req, session, false, next);
+        }
+
+        const hasAdminRole = isAdmin(session.user.roles);
+        if (hasAdminRole) {
+            return handleSuccess(req, session, true, next);
+        }
+
+        const hasAnyRequiredCredential = session.user.roles.some(role => 
+            credList.includes(role.name as CREDENTIAL)
+        );
+
+        if (hasAnyRequiredCredential) {
+            return handleSuccess(req, session, false, next);
+        }
+
+        throw new Error('Not Authorized');
+    } catch (error) {
+        if (error.message === 'Unauthorized') {
+            return Promise.reject(401);
+        }
+        return Promise.reject({ message: error.message });
+    }
 }
